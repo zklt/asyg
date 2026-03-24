@@ -10,80 +10,1124 @@ This document provides a comprehensive architecture design, API specifications, 
 
 ## 系统架构图 (System Architecture)
 
+### 新架构设计理念 (New Architecture Design Philosophy)
+
+本系统采用**任务编排 + 多智能体协作 + 心跳机制**的架构设计，核心特点：
+
+1. **任务编排中心 (Task Orchestrator)**：统一接收请求、任务分解、智能体调度、状态管理
+2. **专用智能体池 (Specialized Agent Pools)**：针对不同任务类型的专用智能体池，支持并行处理
+3. **状态机驱动 (State Machine Driven)**：清晰的状态边界和转换机制，实现流程平滑过渡
+4. **心跳自治 (Heartbeat Autonomy)**：智能体定期/事件驱动自主执行任务，无需用户触发
+
+### 整体架构图
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Mobile App (iOS/Android)                     │
-│                    User Interface Layer                          │
-└────────────────────────┬────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Mobile App (iOS/Android)                             │
+│                    User Interface Layer                                  │
+└────────────────────────┬────────────────────────────────────────────────┘
                          │ HTTPS REST API
                          │ (JWT Authentication)
                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Backend API Server                          │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │              API Gateway & Router                        │   │
-│  │  - User Authentication & Session Management              │   │
-│  │  - Rate Limiting & Request Validation                    │   │
-│  └────────────┬────────────────────────────────────────────┘   │
-│               │                                                  │
-│  ┌────────────▼──────────────────────────────────────────────┐ │
-│  │              Session Manager                               │ │
-│  │  - user_id → session_id mapping                           │ │
-│  │  - Conversation type routing                              │ │
-│  │    • job_search                                           │ │
-│  │    • hr_communication                                     │ │
-│  └────────────┬──────────────────────────────────────────────┘ │
-│               │                                                  │
-│  ┌────────────▼──────────────────────────────────────────────┐ │
-│  │              Agent Orchestration Layer                     │ │
-│  │                                                            │ │
-│  │  ┌─────────────────┐  ┌──────────────────┐               │ │
-│  │  │ Job Search      │  │ HR Communication │               │ │
-│  │  │ Agent           │  │ Agent            │               │ │
-│  │  │ (ReActAgent)    │  │ (ReActAgent)     │               │ │
-│  │  └────────┬────────┘  └────────┬─────────┘               │ │
-│  │           │                     │                          │ │
-│  │  ┌────────▼─────────────────────▼─────────┐               │ │
-│  │  │  Application Assistant Agent            │               │ │
-│  │  │  - Resume optimization                  │               │ │
-│  │  │  - Interview preparation                │               │ │
-│  │  │  - Document generation                  │               │ │
-│  │  └────────┬────────────────────────────────┘               │ │
-│  │           │                                                 │ │
-│  └───────────┼─────────────────────────────────────────────────┘ │
-│              │                                                  │
-│  ┌───────────▼─────────────────────────────────────────────┐  │
-│  │              Toolkit & Tool Layer                        │  │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │  │
-│  │  │ Job Search   │ │ Resume       │ │ Calendar     │    │  │
-│  │  │ Tools        │ │ Tools        │ │ Tools        │    │  │
-│  │  └──────────────┘ └──────────────┘ └──────────────┘    │  │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │  │
-│  │  │ Notification │ │ HR Comm      │ │ Document     │    │  │
-│  │  │ Tools        │ │ Tools        │ │ Gen Tools    │    │  │
-│  │  └──────────────┘ └──────────────┘ └──────────────┘    │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │              Memory & Storage Layer                       │  │
-│  │  ┌────────────────┐  ┌────────────────┐                 │  │
-│  │  │ SQLite/MongoDB │  │ Vector Store   │                 │  │
-│  │  │ Session Store  │  │ (for RAG)      │                 │  │
-│  │  └────────────────┘  └────────────────┘                 │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Backend API Server                                  │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │              API Gateway & Router                                  │  │
+│  │  - User Authentication & Rate Limiting                             │  │
+│  └────────────┬──────────────────────────────────────────────────────┘  │
+│               │                                                           │
+│  ┌────────────▼──────────────────────────────────────────────────────┐  │
+│  │              Session & State Manager                               │  │
+│  │  - User Session Tracking (user_id → session_id)                   │  │
+│  │  - Task State Management (task_id → state + metadata)             │  │
+│  │  - State Transition Events                                         │  │
+│  └────────────┬──────────────────────────────────────────────────────┘  │
+│               │                                                           │
+│  ┌────────────▼──────────────────────────────────────────────────────┐  │
+│  │         ⭐ Task Orchestrator Agent (核心编排智能体)               │  │
+│  │                                                                     │  │
+│  │  核心职责：                                                         │  │
+│  │  1. 接收用户请求，理解意图                                         │  │
+│  │  2. 任务分解与规划 (Task Decomposition)                           │  │
+│  │  3. 智能体调度与资源分配                                           │  │
+│  │  4. 状态机管理与转换控制                                           │  │
+│  │  5. 结果聚合与响应生成                                             │  │
+│  │  6. 异常处理与回滚                                                 │  │
+│  │                                                                     │  │
+│  │  任务编排策略：                                                     │  │
+│  │  • 简单任务 → 直接分配单一 Agent                                  │  │
+│  │  • 复杂任务 → 分解为多个子任务 → 并行/串行执行                    │  │
+│  │  • 批量任务 → Coordinator + Worker Pool 模式                      │  │
+│  └────────┬────────────────────────────────────────────────────────┘  │
+│           │                                                              │
+│           ├──────────────┬──────────────────┬──────────────────┐        │
+│           ▼              ▼                  ▼                  ▼        │
+│  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌────────┐  │
+│  │ Job Search     │ │ Resume         │ │ HR Comm        │ │ Monitor│  │
+│  │ Agent Pool     │ │ Processor Pool │ │ Agent Pool     │ │ Agent  │  │
+│  │ (10 agents)    │ │ (20 agents)    │ │ (5 agents)     │ │        │  │
+│  └────────────────┘ └────────────────┘ └────────────────┘ └────────┘  │
+│                                                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │              Heartbeat & Scheduler Service                         │  │
+│  │                                                                     │  │
+│  │  定期任务 (Periodic Tasks):                                        │  │
+│  │  ├─ 每日职位推荐 (Daily Job Recommendations)                      │  │
+│  │  ├─ 申请状态跟进 (Application Follow-ups)                         │  │
+│  │  ├─ 面试提醒 (Interview Reminders)                                │  │
+│  │  └─ HR 沟通跟进 (HR Communication Follow-ups)                     │  │
+│  │                                                                     │  │
+│  │  事件触发 (Event-Driven):                                          │  │
+│  │  ├─ 新职位匹配 → 自动推送                                         │  │
+│  │  ├─ 申请状态变化 → 通知用户                                       │  │
+│  │  ├─ 简历浏览 → 自动打招呼                                         │  │
+│  │  └─ 面试邀请 → 自动确认 + 日程安排                               │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │              Workflow State Machine (工作流状态机)                 │  │
+│  │                                                                     │  │
+│  │  IDLE → SEARCHING → MATCHING → APPLIED → HR_COMMUNICATION          │  │
+│  │    ↑        ↓           ↓          ↓              ↓                │  │
+│  │    └────────────────────────────────────────── COMPLETED           │  │
+│  │                                                     ↓                │  │
+│  │                                                  ARCHIVED            │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │              Shared Services & Infrastructure                      │  │
+│  │                                                                     │  │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │  │
+│  │  │ Message Queue    │  │ State Store      │  │ Event Bus       │ │  │
+│  │  │ (Redis/RabbitMQ) │  │ (MongoDB/Redis)  │  │ (Redis Pub/Sub) │ │  │
+│  │  └──────────────────┘  └──────────────────┘  └─────────────────┘ │  │
+│  │                                                                     │  │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────────┐ │  │
+│  │  │ Tool Registry    │  │ Memory Store     │  │ Vector Database │ │  │
+│  │  │ (Tool Mgmt)      │  │ (Session Data)   │  │ (RAG)           │ │  │
+│  │  └──────────────────┘  └──────────────────┘  └─────────────────┘ │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
                          │
                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              External Services & Integrations                    │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐           │
-│  │ Multimodal   │ │ Calendar API │ │ Job Board    │           │
-│  │ LLM          │ │ (Google/     │ │ APIs         │           │
-│  │ (GPT-4V/     │ │  Apple)      │ │              │           │
-│  │  Qwen-VL)    │ │              │ │              │           │
-│  └──────────────┘ └──────────────┘ └──────────────┘           │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│              External Services & Integrations                            │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────────┐ │
+│  │ Multimodal   │ │ Calendar API │ │ Job Board    │ │ Email/SMS     │ │
+│  │ LLM          │ │ (Google/     │ │ APIs         │ │ Notification  │ │
+│  │ (GPT-4V/     │ │  Apple)      │ │              │ │               │ │
+│  │  Qwen-VL)    │ │              │ │              │ │               │ │
+│  └──────────────┘ └──────────────┘ └──────────────┘ └───────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 核心设计详解 (Core Design Details)
+
+### 1. 任务编排与智能体协作 (Task Orchestration & Agent Collaboration)
+
+#### 1.1 Task Orchestrator Agent 详细设计
+
+**核心功能模块：**
+
+```python
+class TaskOrchestratorAgent:
+    """
+    任务编排智能体 - 系统的大脑和指挥中心
+
+    职责：
+    1. 请求理解与意图识别
+    2. 任务分解与规划
+    3. 智能体调度与资源分配
+    4. 状态机管理
+    5. 结果聚合与响应生成
+    """
+
+    def __init__(self):
+        self.job_search_pool = AgentPool(size=10, agent_type="job_search")
+        self.resume_processor_pool = AgentPool(size=20, agent_type="resume_processor")
+        self.hr_comm_pool = AgentPool(size=5, agent_type="hr_communication")
+        self.state_manager = WorkflowStateManager()
+        self.event_bus = EventBus()
+
+    async def process_request(self, user_request: UserRequest) -> Response:
+        """处理用户请求的主入口"""
+
+        # Step 1: 理解用户意图
+        intent = await self.understand_intent(user_request)
+
+        # Step 2: 创建任务上下文
+        task_context = self.create_task_context(user_request, intent)
+
+        # Step 3: 任务分解与规划
+        execution_plan = await self.plan_execution(task_context)
+
+        # Step 4: 执行任务编排
+        result = await self.execute_plan(execution_plan, task_context)
+
+        # Step 5: 结果聚合与响应
+        return await self.generate_response(result, task_context)
+```
+
+**任务分类与编排策略：**
+
+| 任务类型 | 复杂度 | 预期时延 | 编排模式 | 智能体配置 |
+|---------|--------|---------|---------|-----------|
+| 简单查询 | 低 | <2s | 单智能体直接处理 | 1个 Job Search Agent |
+| 职位搜索 | 低-中 | 2-5s | 单智能体 + 工具调用 | 1个 Job Search Agent |
+| 单简历分析 | 中 | 3-5s | 单智能体处理 | 1个 Resume Processor |
+| 批量简历匹配 | **高** | 5-15s | **Coordinator + Worker Pool** | 1个协调器 + N个并行Worker |
+| 完整求职流程 | 极高 | 30-60s | **状态机驱动的多阶段流程** | 跨多个Agent Pool |
+
+**批量处理示例：50份简历匹配**
+
+```python
+async def batch_resume_matching(
+    self,
+    task_context: TaskContext,
+    job_requirements: dict,
+    resume_ids: list[str]
+) -> list[MatchResult]:
+    """
+    批量简历匹配 - 使用 Coordinator + Worker Pool 模式
+
+    性能：50份简历，3-5秒完成（vs 单Agent需要100-250秒）
+    """
+
+    # 分批策略：每批10份简历
+    batch_size = 10
+    batches = [resume_ids[i:i+batch_size]
+               for i in range(0, len(resume_ids), batch_size)]
+
+    all_results = []
+
+    for batch in batches:
+        # 并行处理一批简历
+        tasks = []
+        for resume_id in batch:
+            # 从池中获取一个 Resume Processor Agent
+            agent = await self.resume_processor_pool.acquire()
+            task = self.process_single_resume(
+                agent,
+                resume_id,
+                job_requirements,
+                task_context
+            )
+            tasks.append(task)
+
+        # 等待这一批完成
+        batch_results = await asyncio.gather(*tasks)
+        all_results.extend(batch_results)
+
+        # 归还 Agents 到池
+        for agent in agents_used:
+            await self.resume_processor_pool.release(agent)
+
+    # 聚合和排序结果
+    ranked_results = self.rank_candidates(all_results, job_requirements)
+
+    return ranked_results
+```
+
+#### 1.2 各智能体的主要工作内容
+
+**Job Search Agent Pool (职位搜索智能体池)**
+
+```python
+主要功能：
+├─ 职位搜索与推荐
+│  ├─ 根据用户偏好搜索职位
+│  ├─ 使用 RAG 增强搜索结果
+│  └─ 智能过滤和排序
+├─ 职位详情分析
+│  ├─ 提取职位要求
+│  ├─ 分析公司文化
+│  └─ 薪资水平评估
+├─ 简历-职位初步匹配
+│  ├─ 技能匹配度计算
+│  ├─ 经验匹配度评估
+│  └─ 生成匹配分数
+└─ 职位申请准备
+   ├─ 生成求职信
+   ├─ 简历定制建议
+   └─ 面试准备材料
+
+工具调用：
+- search_jobs()
+- get_job_details()
+- analyze_job_requirements()
+- calculate_match_score()
+- generate_cover_letter()
+
+输出：
+- 匹配的职位列表
+- 详细的匹配分析报告
+- 申请建议
+- 状态转换信号 → MATCHING 或 APPLIED
+```
+
+**Resume Processor Agent Pool (简历处理智能体池)**
+
+```python
+主要功能：
+├─ 简历解析与结构化
+│  ├─ 多格式支持 (PDF/DOCX/Image)
+│  ├─ OCR 文字识别
+│  ├─ 信息提取 (姓名/技能/经验/教育)
+│  └─ 结构化存储
+├─ 简历分析与评分
+│  ├─ 完整性评估
+│  ├─ 关键词密度分析
+│  ├─ 格式规范检查
+│  └─ ATS 友好度评估
+├─ 简历优化建议
+│  ├─ 针对特定职位优化
+│  ├─ 关键词建议
+│  ├─ 成就量化建议
+│  └─ 格式改进建议
+└─ 批量简历对比
+   ├─ 多简历并行处理
+   ├─ 候选人排序
+   └─ 优劣势分析
+
+工具调用：
+- parse_resume()
+- extract_structured_data()
+- analyze_resume()
+- optimize_resume_section()
+- calculate_ats_score()
+
+输出：
+- 结构化的简历数据
+- 简历分析报告
+- 优化建议
+- 匹配评分
+```
+
+**HR Communication Agent Pool (HR沟通智能体池)**
+
+```python
+主要功能：
+├─ 消息起草与发送
+│  ├─ 初次联系消息
+│  ├─ 跟进提醒
+│  ├─ 面试确认
+│  └─ 感谢信
+├─ 沟通历史管理
+│  ├─ 记录所有往来
+│  ├─ 关键信息提取
+│  ├─ 情感分析
+│  └─ 响应时效监控
+├─ 面试协调
+│  ├─ 日程安排
+│  ├─ 会议室/视频会议预定
+│  ├─ 提醒通知
+│  └─ 重新安排
+└─ 自动化跟进
+   ├─ 定期状态查询
+   ├─ 无回复提醒
+   ├─ Offer 谈判辅助
+   └─ 入职准备
+
+工具调用：
+- send_hr_message()
+- schedule_interview()
+- create_calendar_event()
+- track_communication_status()
+- generate_follow_up_message()
+
+输出：
+- 已发送的消息记录
+- 面试安排确认
+- 沟通状态更新
+- 状态转换信号 → COMPLETED 或需要用户介入
+```
+
+### 2. Agent 状态边界与平滑过渡机制 (State Boundaries & Smooth Transitions)
+
+#### 2.1 工作流状态机详细设计
+
+```python
+class WorkflowState(Enum):
+    """工作流状态定义"""
+    IDLE = "idle"                           # 空闲状态
+    SEARCHING = "searching"                 # 职位搜索中
+    MATCHING = "matching"                   # 简历匹配中
+    APPLIED = "applied"                     # 已申请职位
+    HR_COMMUNICATION = "hr_communication"   # HR沟通中
+    INTERVIEW_SCHEDULED = "interview_scheduled"  # 面试已安排
+    COMPLETED = "completed"                 # 流程完成
+    ARCHIVED = "archived"                   # 已归档
+    FAILED = "failed"                       # 流程失败
+
+class StateTransition:
+    """状态转换规则"""
+
+    # 状态转换映射表
+    TRANSITIONS = {
+        WorkflowState.IDLE: [WorkflowState.SEARCHING],
+        WorkflowState.SEARCHING: [
+            WorkflowState.MATCHING,      # 找到职位 → 开始匹配
+            WorkflowState.IDLE,          # 未找到 → 返回空闲
+        ],
+        WorkflowState.MATCHING: [
+            WorkflowState.APPLIED,       # 匹配成功 → 提交申请
+            WorkflowState.SEARCHING,     # 匹配不佳 → 继续搜索
+        ],
+        WorkflowState.APPLIED: [
+            WorkflowState.HR_COMMUNICATION,  # 申请后 → 自动打招呼
+            WorkflowState.COMPLETED,         # 申请被拒 → 结束
+        ],
+        WorkflowState.HR_COMMUNICATION: [
+            WorkflowState.INTERVIEW_SCHEDULED,  # 获得面试 → 安排面试
+            WorkflowState.COMPLETED,            # 沟通结束 → 完成
+            WorkflowState.APPLIED,              # 需要补充材料 → 回到申请
+        ],
+        WorkflowState.INTERVIEW_SCHEDULED: [
+            WorkflowState.COMPLETED,     # 面试完成 → 结束
+        ],
+        WorkflowState.COMPLETED: [
+            WorkflowState.ARCHIVED,      # 归档
+            WorkflowState.IDLE,          # 重新开始
+        ],
+    }
+
+    @classmethod
+    def can_transition(cls, from_state: WorkflowState,
+                      to_state: WorkflowState) -> bool:
+        """检查状态转换是否合法"""
+        return to_state in cls.TRANSITIONS.get(from_state, [])
+```
+
+#### 2.2 关键状态转换：Job Search → HR Communication
+
+**场景：用户申请职位后，自动触发 HR 沟通**
+
+```python
+async def handle_application_submitted(
+    self,
+    task_context: TaskContext,
+    application_result: ApplicationResult
+):
+    """
+    处理申请提交成功事件
+
+    关键点：
+    1. 检查状态转换合法性
+    2. 数据传递与上下文继承
+    3. 触发 HR Communication Agent
+    4. 设置自动化跟进任务
+    """
+
+    # Step 1: 验证状态转换
+    current_state = await self.state_manager.get_state(task_context.task_id)
+    if not StateTransition.can_transition(
+        current_state,
+        WorkflowState.HR_COMMUNICATION
+    ):
+        logger.error(f"Invalid state transition: {current_state} → HR_COMMUNICATION")
+        return
+
+    # Step 2: 构建 HR Communication 上下文
+    hr_context = HRCommunicationContext(
+        task_id=task_context.task_id,
+        user_id=task_context.user_id,
+        job_id=application_result.job_id,
+        company_name=application_result.company_name,
+        hr_contact=application_result.hr_contact,
+        application_date=datetime.now(),
+        # 继承之前的上下文
+        user_profile=task_context.user_profile,
+        resume_data=task_context.resume_data,
+        cover_letter=application_result.cover_letter,
+    )
+
+    # Step 3: 更新状态
+    await self.state_manager.transition_to(
+        task_id=task_context.task_id,
+        new_state=WorkflowState.HR_COMMUNICATION,
+        metadata={
+            "trigger": "application_submitted",
+            "application_id": application_result.application_id,
+            "transition_time": datetime.now().isoformat(),
+        }
+    )
+
+    # Step 4: 发送状态转换事件
+    await self.event_bus.publish(
+        event=StateTransitionEvent(
+            task_id=task_context.task_id,
+            from_state=current_state,
+            to_state=WorkflowState.HR_COMMUNICATION,
+            context=hr_context,
+        )
+    )
+
+    # Step 5: 触发 HR Communication Agent（延迟24小时）
+    await self.schedule_hr_greeting(hr_context, delay_hours=24)
+
+    # Step 6: 设置定期跟进任务
+    await self.heartbeat_service.register_task(
+        task_id=f"hr_followup_{task_context.task_id}",
+        task_type="hr_communication_followup",
+        schedule="every 3 days",
+        max_attempts=5,
+        context=hr_context,
+    )
+
+    logger.info(
+        f"State transition completed: {current_state} → HR_COMMUNICATION"
+        f" for task {task_context.task_id}"
+    )
+
+async def schedule_hr_greeting(
+    self,
+    hr_context: HRCommunicationContext,
+    delay_hours: int = 24
+):
+    """
+    安排 HR 打招呼任务
+
+    策略：
+    - 申请提交后 24 小时自动发送初次联系
+    - 使用礼貌、专业的语气
+    - 表达对职位的兴趣
+    - 附上关键信息
+    """
+
+    # 从 HR Communication Agent Pool 获取智能体
+    hr_agent = await self.hr_comm_pool.acquire()
+
+    try:
+        # 生成初次联系消息
+        greeting_message = await hr_agent.generate_greeting_message(
+            company_name=hr_context.company_name,
+            job_title=hr_context.job_title,
+            user_name=hr_context.user_profile.name,
+            highlights=hr_context.resume_data.key_achievements[:3],
+        )
+
+        # 延迟发送（24小时后）
+        await self.scheduler.schedule_task(
+            task_name=f"hr_greeting_{hr_context.task_id}",
+            execute_at=datetime.now() + timedelta(hours=delay_hours),
+            task_func=hr_agent.send_message,
+            task_args={
+                "recipient": hr_context.hr_contact,
+                "subject": f"Following up on {hr_context.job_title} Application",
+                "message": greeting_message,
+                "context": hr_context,
+            }
+        )
+
+        logger.info(
+            f"HR greeting scheduled for {delay_hours} hours later "
+            f"(task: {hr_context.task_id})"
+        )
+
+    finally:
+        # 归还智能体到池
+        await self.hr_comm_pool.release(hr_agent)
+```
+
+**状态转换的数据流：**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Job Search Agent (完成申请)                                │
+│                                                              │
+│  输出数据包：                                                │
+│  ├─ application_id                                          │
+│  ├─ job_details (公司、职位、HR联系方式)                    │
+│  ├─ application_materials (简历、求职信)                    │
+│  └─ application_status: "submitted"                         │
+└─────────────┬───────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Task Orchestrator (状态转换控制器)                         │
+│                                                              │
+│  1. 验证转换合法性 ✓                                        │
+│  2. 构建 HR Communication Context                           │
+│     - 继承 Job Search 上下文                                │
+│     - 添加 HR 特定信息                                      │
+│  3. 更新 State Store                                        │
+│  4. 发布状态转换事件                                        │
+│  5. 触发 HR Agent 初始化                                    │
+└─────────────┬───────────────────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  HR Communication Agent (开始工作)                           │
+│                                                              │
+│  接收数据：                                                  │
+│  ├─ hr_context (完整上下文)                                 │
+│  ├─ user_profile (用户档案)                                 │
+│  ├─ job_details (职位详情)                                  │
+│  └─ application_materials (申请材料)                        │
+│                                                              │
+│  执行任务：                                                  │
+│  1. 24小时后发送初次打招呼                                  │
+│  2. 每3天检查申请状态                                       │
+│  3. 收到回复 → 及时响应                                     │
+│  4. 7天无回复 → 发送礼貌跟进                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3. 心跳机制与自动化任务 (Heartbeat Mechanism & Autonomous Tasks)
+
+#### 3.1 Heartbeat Service 设计
+
+**灵感来源：OpenClaw 的心跳机制**
+
+OpenClaw 使用心跳机制让 Agent 定期"苏醒"并执行预定任务，无需外部触发。我们采用类似设计：
+
+```python
+class HeartbeatService:
+    """
+    心跳服务 - 让智能体自主运行
+
+    核心理念：
+    1. 定期任务：按固定时间间隔执行（cron-style）
+    2. 事件驱动：基于特定事件触发
+    3. 条件检查：满足条件时自动执行
+    4. 智能调度：根据优先级和负载动态调整
+    """
+
+    def __init__(self):
+        self.scheduler = AsyncIOScheduler()  # APScheduler
+        self.event_bus = EventBus()
+        self.task_registry = {}
+        self.agent_pools = {}
+
+    async def start(self):
+        """启动心跳服务"""
+        self.scheduler.start()
+        await self.register_default_tasks()
+        logger.info("Heartbeat service started")
+
+    async def register_task(
+        self,
+        task_id: str,
+        task_type: str,
+        schedule: str | dict,  # "every 1 day" 或 cron 表达式
+        agent_type: str,
+        task_handler: Callable,
+        context: dict,
+        condition: Callable = None,  # 可选的执行条件
+        max_attempts: int = None,
+        priority: int = 5,
+    ):
+        """
+        注册一个心跳任务
+
+        Args:
+            task_id: 任务唯一标识
+            task_type: 任务类型（用于分类和监控）
+            schedule: 调度规则
+                - "every 1 day" (每天)
+                - "every 3 hours" (每3小时)
+                - "0 9 * * *" (每天早上9点 - cron)
+            agent_type: 需要使用的智能体类型
+            task_handler: 任务执行函数
+            context: 任务上下文
+            condition: 可选的执行条件函数
+            max_attempts: 最大执行次数
+            priority: 优先级 (1-10)
+        """
+
+        task_config = HeartbeatTask(
+            task_id=task_id,
+            task_type=task_type,
+            schedule=schedule,
+            agent_type=agent_type,
+            handler=task_handler,
+            context=context,
+            condition=condition,
+            max_attempts=max_attempts,
+            priority=priority,
+            created_at=datetime.now(),
+            attempts=0,
+        )
+
+        self.task_registry[task_id] = task_config
+
+        # 根据调度规则添加定时任务
+        if isinstance(schedule, str) and schedule.startswith("every"):
+            # 解析 "every X hours/days" 格式
+            interval = self._parse_interval(schedule)
+            self.scheduler.add_job(
+                func=self._execute_heartbeat_task,
+                trigger='interval',
+                **interval,
+                args=[task_id],
+                id=task_id,
+            )
+        else:
+            # Cron 表达式
+            self.scheduler.add_job(
+                func=self._execute_heartbeat_task,
+                trigger='cron',
+                **self._parse_cron(schedule),
+                args=[task_id],
+                id=task_id,
+            )
+
+        logger.info(f"Heartbeat task registered: {task_id} ({schedule})")
+
+    async def _execute_heartbeat_task(self, task_id: str):
+        """执行心跳任务"""
+
+        task_config = self.task_registry.get(task_id)
+        if not task_config:
+            logger.warning(f"Task not found: {task_id}")
+            return
+
+        # 检查是否达到最大执行次数
+        if (task_config.max_attempts and
+            task_config.attempts >= task_config.max_attempts):
+            logger.info(f"Task {task_id} reached max attempts, removing")
+            await self.unregister_task(task_id)
+            return
+
+        # 检查执行条件
+        if task_config.condition and not await task_config.condition(task_config.context):
+            logger.debug(f"Task {task_id} condition not met, skipping")
+            return
+
+        # 获取对应的智能体
+        agent_pool = self.agent_pools.get(task_config.agent_type)
+        if not agent_pool:
+            logger.error(f"Agent pool not found: {task_config.agent_type}")
+            return
+
+        agent = await agent_pool.acquire()
+
+        try:
+            logger.info(f"Executing heartbeat task: {task_id} (attempt {task_config.attempts + 1})")
+
+            # 执行任务
+            result = await task_config.handler(
+                agent=agent,
+                context=task_config.context
+            )
+
+            # 更新执行次数
+            task_config.attempts += 1
+            task_config.last_executed = datetime.now()
+            task_config.last_result = result
+
+            # 发布任务完成事件
+            await self.event_bus.publish(
+                HeartbeatTaskCompletedEvent(
+                    task_id=task_id,
+                    task_type=task_config.task_type,
+                    result=result,
+                    executed_at=datetime.now(),
+                )
+            )
+
+            logger.info(f"Heartbeat task completed: {task_id}")
+
+        except Exception as e:
+            logger.error(f"Heartbeat task failed: {task_id}, error: {e}")
+            task_config.failures += 1
+
+            # 发布任务失败事件
+            await self.event_bus.publish(
+                HeartbeatTaskFailedEvent(
+                    task_id=task_id,
+                    error=str(e),
+                    executed_at=datetime.now(),
+                )
+            )
+
+        finally:
+            # 归还智能体
+            await agent_pool.release(agent)
+```
+
+#### 3.2 预定义心跳任务
+
+**每日职位推荐（Daily Job Recommendations）**
+
+```python
+async def daily_job_recommendations_handler(
+    agent: JobSearchAgent,
+    context: dict
+) -> dict:
+    """
+    每日职位推荐任务
+
+    执行时间：每天早上 9:00
+    智能体：Job Search Agent
+    """
+    user_id = context["user_id"]
+    user_preferences = context["user_preferences"]
+
+    # 搜索新发布的职位
+    new_jobs = await agent.search_jobs(
+        keywords=user_preferences.get("keywords"),
+        location=user_preferences.get("location"),
+        posted_since="yesterday",
+        limit=10,
+    )
+
+    if not new_jobs:
+        logger.info(f"No new jobs found for user {user_id}")
+        return {"status": "no_new_jobs"}
+
+    # 根据用户简历计算匹配度
+    user_resume = await get_user_resume(user_id)
+    matched_jobs = await agent.match_jobs(new_jobs, user_resume)
+
+    # 过滤出高匹配度的职位（>80%）
+    top_matches = [job for job in matched_jobs if job.match_score > 0.8]
+
+    if top_matches:
+        # 发送推送通知
+        await send_notification(
+            user_id=user_id,
+            title=f"🎯 发现 {len(top_matches)} 个高匹配职位！",
+            message=f"根据您的简历，我们找到了 {len(top_matches)} 个匹配度超过 80% 的新职位",
+            data={"jobs": [job.to_dict() for job in top_matches]},
+        )
+
+        logger.info(f"Sent {len(top_matches)} job recommendations to user {user_id}")
+
+    return {
+        "status": "success",
+        "jobs_found": len(new_jobs),
+        "top_matches": len(top_matches),
+    }
+
+# 注册任务
+await heartbeat_service.register_task(
+    task_id=f"daily_recommendations_{user_id}",
+    task_type="job_recommendations",
+    schedule="0 9 * * *",  # 每天早上9点
+    agent_type="job_search",
+    task_handler=daily_job_recommendations_handler,
+    context={
+        "user_id": user_id,
+        "user_preferences": user_preferences,
+    },
+)
+```
+
+**申请状态跟进（Application Follow-ups）**
+
+```python
+async def application_followup_handler(
+    agent: HRCommunicationAgent,
+    context: dict
+) -> dict:
+    """
+    申请状态跟进任务
+
+    执行时间：每3天检查一次
+    智能体：HR Communication Agent
+    最大执行次数：5次（15天后停止）
+    """
+    application_id = context["application_id"]
+    task_context = context["task_context"]
+
+    # 检查申请状态
+    application_status = await get_application_status(application_id)
+
+    if application_status.state == "completed":
+        logger.info(f"Application {application_id} completed, stopping followup")
+        return {"status": "completed", "action": "stop_followup"}
+
+    # 检查最近一次沟通时间
+    last_communication = await get_last_communication(
+        application_id=application_id
+    )
+
+    days_since_last_contact = (
+        datetime.now() - last_communication.timestamp
+    ).days
+
+    # 如果7天无回复，发送礼貌跟进
+    if days_since_last_contact >= 7:
+        followup_message = await agent.generate_followup_message(
+            application=application_status,
+            days_elapsed=days_since_last_contact,
+            tone="polite_and_professional",
+        )
+
+        await agent.send_message(
+            recipient=application_status.hr_contact,
+            subject=f"Following up - {application_status.job_title} Application",
+            message=followup_message,
+        )
+
+        logger.info(
+            f"Sent followup for application {application_id} "
+            f"({days_since_last_contact} days since last contact)"
+        )
+
+        return {
+            "status": "followup_sent",
+            "days_elapsed": days_since_last_contact,
+        }
+
+    return {"status": "no_action_needed"}
+
+# 注册任务（申请提交后自动注册）
+await heartbeat_service.register_task(
+    task_id=f"followup_{application_id}",
+    task_type="application_followup",
+    schedule="every 3 days",
+    agent_type="hr_communication",
+    task_handler=application_followup_handler,
+    context={
+        "application_id": application_id,
+        "task_context": task_context,
+    },
+    max_attempts=5,  # 最多跟进5次（15天）
+)
+```
+
+**面试提醒（Interview Reminders）**
+
+```python
+async def interview_reminder_handler(
+    agent: HRCommunicationAgent,
+    context: dict
+) -> dict:
+    """
+    面试提醒任务
+
+    执行时间：
+    - 面试前24小时
+    - 面试前1小时
+    智能体：HR Communication Agent
+    """
+    interview_id = context["interview_id"]
+    reminder_type = context["reminder_type"]  # "24h" or "1h"
+
+    interview = await get_interview_details(interview_id)
+
+    if reminder_type == "24h":
+        message = f"""
+        明天您有一场面试！
+
+        📅 时间：{interview.datetime}
+        🏢 公司：{interview.company_name}
+        💼 职位：{interview.job_title}
+        📍 地点：{interview.location or interview.meeting_link}
+
+        准备建议：
+        1. 复习职位描述和公司背景
+        2. 准备常见面试问题的回答
+        3. 准备2-3个问题问面试官
+        4. 检查设备和网络（如果是远程面试）
+
+        祝您面试顺利！🎉
+        """
+    else:  # 1h
+        message = f"""
+        ⏰ 提醒：1小时后您有面试！
+
+        📅 时间：{interview.datetime}
+        🏢 公司：{interview.company_name}
+        💼 职位：{interview.job_title}
+        📍 地点：{interview.location or interview.meeting_link}
+
+        请确保已准备就绪！
+        """
+
+    await send_notification(
+        user_id=interview.user_id,
+        title=f"面试提醒 - {interview.company_name}",
+        message=message,
+        priority="high",
+    )
+
+    return {"status": "reminder_sent", "type": reminder_type}
+
+# 面试安排时自动注册提醒任务
+async def schedule_interview_reminders(interview: Interview):
+    """安排面试提醒"""
+
+    # 24小时提醒
+    reminder_24h_time = interview.datetime - timedelta(hours=24)
+    await heartbeat_service.register_task(
+        task_id=f"interview_reminder_24h_{interview.id}",
+        task_type="interview_reminder",
+        schedule=reminder_24h_time.strftime("%M %H %d %m *"),  # Cron格式
+        agent_type="hr_communication",
+        task_handler=interview_reminder_handler,
+        context={
+            "interview_id": interview.id,
+            "reminder_type": "24h",
+        },
+        max_attempts=1,
+    )
+
+    # 1小时提醒
+    reminder_1h_time = interview.datetime - timedelta(hours=1)
+    await heartbeat_service.register_task(
+        task_id=f"interview_reminder_1h_{interview.id}",
+        task_type="interview_reminder",
+        schedule=reminder_1h_time.strftime("%M %H %d %m *"),
+        agent_type="hr_communication",
+        task_handler=interview_reminder_handler,
+        context={
+            "interview_id": interview.id,
+            "reminder_type": "1h",
+        },
+        max_attempts=1,
+    )
+```
+
+**事件驱动的自动化任务**
+
+```python
+class EventDrivenAutomation:
+    """事件驱动的自动化任务"""
+
+    def __init__(self, event_bus: EventBus, agent_pools: dict):
+        self.event_bus = event_bus
+        self.agent_pools = agent_pools
+        self.register_event_handlers()
+
+    def register_event_handlers(self):
+        """注册事件处理器"""
+
+        # 简历被浏览 → 自动打招呼
+        self.event_bus.subscribe(
+            event_type="resume_viewed_by_hr",
+            handler=self.handle_resume_viewed,
+        )
+
+        # 收到面试邀请 → 自动确认并安排
+        self.event_bus.subscribe(
+            event_type="interview_invitation_received",
+            handler=self.handle_interview_invitation,
+        )
+
+        # 申请状态变化 → 通知用户
+        self.event_bus.subscribe(
+            event_type="application_status_changed",
+            handler=self.handle_application_status_change,
+        )
+
+        # 新职位匹配 → 自动推送
+        self.event_bus.subscribe(
+            event_type="new_job_matched",
+            handler=self.handle_new_job_match,
+        )
+
+    async def handle_resume_viewed(self, event: ResumeViewedEvent):
+        """处理简历被浏览事件 - 自动打招呼"""
+
+        hr_agent = await self.agent_pools["hr_communication"].acquire()
+
+        try:
+            # 生成友好的打招呼消息
+            greeting = await hr_agent.generate_greeting_after_view(
+                company_name=event.company_name,
+                job_title=event.job_title,
+                user_profile=event.user_profile,
+            )
+
+            # 发送消息
+            await hr_agent.send_message(
+                recipient=event.hr_contact,
+                subject=f"Thank you for viewing my profile",
+                message=greeting,
+            )
+
+            logger.info(
+                f"Sent auto-greeting after resume view: "
+                f"{event.user_id} → {event.company_name}"
+            )
+
+        finally:
+            await self.agent_pools["hr_communication"].release(hr_agent)
+
+    async def handle_interview_invitation(
+        self,
+        event: InterviewInvitationEvent
+    ):
+        """处理面试邀请 - 自动确认并安排"""
+
+        hr_agent = await self.agent_pools["hr_communication"].acquire()
+
+        try:
+            # 检查用户日历可用性
+            available_slots = await check_calendar_availability(
+                user_id=event.user_id,
+                proposed_times=event.proposed_times,
+            )
+
+            if available_slots:
+                # 自动确认第一个可用时间
+                selected_time = available_slots[0]
+
+                # 发送确认消息
+                confirmation = await hr_agent.generate_interview_confirmation(
+                    selected_time=selected_time,
+                    interview_details=event.interview_details,
+                )
+
+                await hr_agent.send_message(
+                    recipient=event.hr_contact,
+                    subject="Interview Confirmation",
+                    message=confirmation,
+                )
+
+                # 添加到日历
+                await create_calendar_event(
+                    user_id=event.user_id,
+                    title=f"Interview - {event.company_name}",
+                    datetime=selected_time,
+                    duration_minutes=event.interview_duration or 60,
+                    location=event.meeting_link,
+                )
+
+                # 安排提醒任务
+                await schedule_interview_reminders(event.interview_id)
+
+                logger.info(
+                    f"Auto-confirmed interview: {event.user_id} → "
+                    f"{event.company_name} at {selected_time}"
+                )
+            else:
+                # 无可用时间，请求用户介入
+                await notify_user_intervention_needed(
+                    user_id=event.user_id,
+                    reason="interview_scheduling_conflict",
+                    details=event.to_dict(),
+                )
+
+        finally:
+            await self.agent_pools["hr_communication"].release(hr_agent)
+```
+
+#### 3.3 心跳机制的优势
+
+**与传统定时任务的对比：**
+
+| 特性 | 传统 Cron/定时任务 | 心跳机制 + 智能体 |
+|-----|------------------|------------------|
+| 灵活性 | 固定时间执行 | 时间 + 条件 + 事件驱动 |
+| 智能性 | 执行固定脚本 | AI智能体自主判断和处理 |
+| 上下文理解 | 无 | 完整的任务上下文和历史 |
+| 个性化 | 所有用户相同逻辑 | 根据用户情况个性化处理 |
+| 错误处理 | 简单重试或失败 | 智能分析并调整策略 |
+| 可扩展性 | 手动添加新任务 | 动态注册和管理 |
+
+**心跳机制带来的能力：**
+
+1. **主动性**：智能体不再被动等待用户请求，可以主动发现机会并采取行动
+2. **持续性**：即使用户不在线，智能体持续工作（搜索职位、跟进申请、安排面试）
+3. **智能性**：根据上下文和历史做出判断（什么时候跟进、如何表达、是否需要用户介入）
+4. **个性化**：每个用户有独立的心跳任务，根据个人情况定制
+5. **可靠性**：自动重试、错误恢复、状态持久化
 
 ---
 
