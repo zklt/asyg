@@ -57,16 +57,16 @@ This document provides a comprehensive architecture design, API specifications, 
 │  │  任务编排策略：                                                     │  │
 │  │  • 简单任务 → 直接分配单一 Agent                                  │  │
 │  │  • 复杂任务 → 分解为多个子任务 → 并行/串行执行                    │  │
-│  │  • 批量任务 → Coordinator + Worker Pool 模式                      │  │
+│  │  • 批量任务 → 并行调度多个 Agent 实例                             │  │
 │  └────────┬────────────────────────────────────────────────────────┘  │
 │           │                                                              │
-│           ├──────────────┬──────────────────┬──────────────────┐        │
-│           ▼              ▼                  ▼                  ▼        │
-│  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌────────┐  │
-│  │ Job Search     │ │ Resume         │ │ HR Comm        │ │ Monitor│  │
-│  │ Agent Pool     │ │ Processor Pool │ │ Agent Pool     │ │ Agent  │  │
-│  │ (10 agents)    │ │ (20 agents)    │ │ (5 agents)     │ │        │  │
-│  └────────────────┘ └────────────────┘ └────────────────┘ └────────┘  │
+│           ├──────────────────────────┬──────────────────┐               │
+│           ▼                          ▼                  ▼               │
+│  ┌────────────────┐         ┌────────────────┐ ┌────────────────┐     │
+│  │ Job Search     │         │ HR Comm        │ │ Monitor        │     │
+│  │ Agent Pool     │         │ Agent Pool     │ │ Agent          │     │
+│  │ (10 agents)    │         │ (5 agents)     │ │                │     │
+│  └────────────────┘         └────────────────┘ └────────────────┘     │
 │                                                                           │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
 │  │              Heartbeat & Scheduler Service                         │  │
@@ -87,8 +87,8 @@ This document provides a comprehensive architecture design, API specifications, 
 │  ┌───────────────────────────────────────────────────────────────────┐  │
 │  │              Workflow State Machine (工作流状态机)                 │  │
 │  │                                                                     │  │
-│  │  IDLE → SEARCHING → MATCHING → APPLIED → HR_COMMUNICATION          │  │
-│  │    ↑        ↓           ↓          ↓              ↓                │  │
+│  │  IDLE → SEARCHING → MATCHING → HR_COMMUNICATION → INTERVIEW_SCHEDULED  │
+│  │    ↑        ↓           ↓          ↓                   ↓        │  │
 │  │    └────────────────────────────────────────── COMPLETED           │  │
 │  │                                                     ↓                │  │
 │  │                                                  ARCHIVED            │  │
@@ -146,10 +146,10 @@ class TaskOrchestratorAgent:
 
     def __init__(self):
         self.job_search_pool = AgentPool(size=10, agent_type="job_search")
-        self.resume_processor_pool = AgentPool(size=20, agent_type="resume_processor")
         self.hr_comm_pool = AgentPool(size=5, agent_type="hr_communication")
         self.state_manager = WorkflowStateManager()
         self.event_bus = EventBus()
+        self.resume_api_client = ResumeAPIClient()  # API client for resume processing
 
     async def process_request(self, user_request: UserRequest) -> Response:
         """处理用户请求的主入口"""
@@ -176,42 +176,48 @@ class TaskOrchestratorAgent:
 |---------|--------|---------|---------|-----------|
 | 简单查询 | 低 | <2s | 单智能体直接处理 | 1个 Job Search Agent |
 | 职位搜索 | 低-中 | 2-5s | 单智能体 + 工具调用 | 1个 Job Search Agent |
-| 单简历分析 | 中 | 3-5s | 单智能体处理 | 1个 Resume Processor |
-| 批量简历匹配 | **高** | 5-15s | **Coordinator + Worker Pool** | 1个协调器 + N个并行Worker |
+| 简历-职位匹配 | 中 | 3-5s | 单智能体 + API调用 | 1个 Job Search Agent + Resume API |
+| 批量职位匹配 | **高** | 5-15s | **并行多智能体实例** | N个并行 Job Search Agent |
 | 完整求职流程 | 极高 | 30-60s | **状态机驱动的多阶段流程** | 跨多个Agent Pool |
 
-**批量处理示例：50份简历匹配**
+**批量处理示例：匹配50个职位**
 
 ```python
-async def batch_resume_matching(
+async def batch_job_matching(
     self,
     task_context: TaskContext,
-    job_requirements: dict,
-    resume_ids: list[str]
+    user_resume_id: str,
+    job_ids: list[str]
 ) -> list[MatchResult]:
     """
-    批量简历匹配 - 使用 Coordinator + Worker Pool 模式
+    批量职位匹配 - 使用并行多智能体实例模式
 
-    性能：50份简历，3-5秒完成（vs 单Agent需要100-250秒）
+    性能：50个职位，3-5秒完成
     """
 
-    # 分批策略：每批10份简历
+    # Step 1: 调用 Resume API 解析简历（一次性）
+    resume_data = await self.resume_api_client.parse_resume(
+        resume_id=user_resume_id,
+        extract_fields=["skills", "experience", "education", "achievements"]
+    )
+
+    # Step 2: 分批策略：每批10个职位
     batch_size = 10
-    batches = [resume_ids[i:i+batch_size]
-               for i in range(0, len(resume_ids), batch_size)]
+    batches = [job_ids[i:i+batch_size]
+               for i in range(0, len(job_ids), batch_size)]
 
     all_results = []
 
     for batch in batches:
-        # 并行处理一批简历
+        # 并行处理一批职位
         tasks = []
-        for resume_id in batch:
-            # 从池中获取一个 Resume Processor Agent
-            agent = await self.resume_processor_pool.acquire()
-            task = self.process_single_resume(
+        for job_id in batch:
+            # 从池中获取一个 Job Search Agent
+            agent = await self.job_search_pool.acquire()
+            task = self.match_single_job(
                 agent,
-                resume_id,
-                job_requirements,
+                job_id,
+                resume_data,
                 task_context
             )
             tasks.append(task)
@@ -222,17 +228,23 @@ async def batch_resume_matching(
 
         # 归还 Agents 到池
         for agent in agents_used:
-            await self.resume_processor_pool.release(agent)
+            await self.job_search_pool.release(agent)
 
-    # 聚合和排序结果
-    ranked_results = self.rank_candidates(all_results, job_requirements)
+    # 聚合和排序结果（按匹配分数）
+    ranked_results = self.rank_jobs(all_results)
 
-    return ranked_results
+    # 过滤高匹配度职位（超过阈值）
+    high_match_jobs = [
+        job for job in ranked_results
+        if job.match_score >= task_context.match_threshold  # 例如 0.75
+    ]
+
+    return high_match_jobs
 ```
 
 #### 1.2 各智能体的主要工作内容
 
-**Job Search Agent Pool (职位搜索智能体池)**
+**Job Search Agent Pool (职位搜索智能体池，10个智能体)**
 
 ```python
 主要功能：
@@ -244,73 +256,48 @@ async def batch_resume_matching(
 │  ├─ 提取职位要求
 │  ├─ 分析公司文化
 │  └─ 薪资水平评估
-├─ 简历-职位初步匹配
+├─ 简历解析与匹配
+│  ├─ 调用 Resume API 解析用户简历
 │  ├─ 技能匹配度计算
 │  ├─ 经验匹配度评估
 │  └─ 生成匹配分数
-└─ 职位申请准备
-   ├─ 生成求职信
-   ├─ 简历定制建议
-   └─ 面试准备材料
+└─ 匹配决策
+   ├─ 判断是否超过匹配阈值（例如 75%）
+   ├─ 生成匹配报告
+   └─ 触发状态转换 → HR_COMMUNICATION
 
 工具调用：
-- search_jobs()
-- get_job_details()
-- analyze_job_requirements()
-- calculate_match_score()
-- generate_cover_letter()
+- search_jobs()              # 搜索职位
+- get_job_details()          # 获取职位详情
+- analyze_job_requirements() # 分析职位要求
+- parse_resume_via_api()     # 通过 API 解析简历
+- calculate_match_score()    # 计算匹配分数
+
+API 依赖：
+- Resume API: 用于解析简历（PDF/DOCX/Image → 结构化数据）
+  - parse_resume(resume_id) → {skills, experience, education, achievements}
+
+工作流程：
+1. 接收用户搜索请求
+2. 搜索并获取职位列表
+3. 调用 Resume API 解析用户简历（一次性）
+4. 对每个职位计算匹配分数
+5. 过滤出高匹配度职位（超过阈值，例如 75%）
+6. 当找到匹配职位时，触发状态转换 → HR_COMMUNICATION
+7. 将职位信息和匹配报告传递给 HR Communication Agent
 
 输出：
-- 匹配的职位列表
+- 匹配的职位列表（按匹配分数排序）
 - 详细的匹配分析报告
-- 申请建议
-- 状态转换信号 → MATCHING 或 APPLIED
+- 状态转换信号 → HR_COMMUNICATION（当匹配分数 ≥ 阈值）
 ```
 
-**Resume Processor Agent Pool (简历处理智能体池)**
-
-```python
-主要功能：
-├─ 简历解析与结构化
-│  ├─ 多格式支持 (PDF/DOCX/Image)
-│  ├─ OCR 文字识别
-│  ├─ 信息提取 (姓名/技能/经验/教育)
-│  └─ 结构化存储
-├─ 简历分析与评分
-│  ├─ 完整性评估
-│  ├─ 关键词密度分析
-│  ├─ 格式规范检查
-│  └─ ATS 友好度评估
-├─ 简历优化建议
-│  ├─ 针对特定职位优化
-│  ├─ 关键词建议
-│  ├─ 成就量化建议
-│  └─ 格式改进建议
-└─ 批量简历对比
-   ├─ 多简历并行处理
-   ├─ 候选人排序
-   └─ 优劣势分析
-
-工具调用：
-- parse_resume()
-- extract_structured_data()
-- analyze_resume()
-- optimize_resume_section()
-- calculate_ats_score()
-
-输出：
-- 结构化的简历数据
-- 简历分析报告
-- 优化建议
-- 匹配评分
-```
-
-**HR Communication Agent Pool (HR沟通智能体池)**
+**HR Communication Agent Pool (HR沟通智能体池，5个智能体)**
 
 ```python
 主要功能：
 ├─ 消息起草与发送
-│  ├─ 初次联系消息
+│  ├─ 初次联系消息（打招呼）
 │  ├─ 跟进提醒
 │  ├─ 面试确认
 │  └─ 感谢信
@@ -331,17 +318,34 @@ async def batch_resume_matching(
    └─ 入职准备
 
 工具调用：
-- send_hr_message()
-- schedule_interview()
-- create_calendar_event()
-- track_communication_status()
-- generate_follow_up_message()
+- send_hr_message()              # 发送HR消息
+- schedule_interview()           # 安排面试
+- create_calendar_event()        # 创建日历事件
+- track_communication_status()   # 跟踪沟通状态
+- generate_follow_up_message()   # 生成跟进消息
+
+工作流程：
+1. 接收来自 Job Search Agent 的匹配结果
+   - 职位信息（公司、职位、HR 联系方式）
+   - 匹配报告（匹配分数、优势亮点）
+   - 用户简历数据
+2. 生成个性化的初次联系消息
+   - 突出匹配优势
+   - 专业且友好的语气
+   - 简洁表达兴趣
+3. 发送消息给 HR（可设置延迟，例如立即或24小时后）
+4. 注册心跳任务进行自动跟进
+   - 每3天检查申请状态
+   - 7天无回复自动发送礼貌跟进
+   - 最多跟进5次（15天）
+5. 处理 HR 回复和后续沟通
+6. 面试邀请的自动确认和日程安排
 
 输出：
 - 已发送的消息记录
 - 面试安排确认
 - 沟通状态更新
-- 状态转换信号 → COMPLETED 或需要用户介入
+- 状态转换信号 → INTERVIEW_SCHEDULED 或 COMPLETED
 ```
 
 ### 2. Agent 状态边界与平滑过渡机制 (State Boundaries & Smooth Transitions)
@@ -353,9 +357,8 @@ class WorkflowState(Enum):
     """工作流状态定义"""
     IDLE = "idle"                           # 空闲状态
     SEARCHING = "searching"                 # 职位搜索中
-    MATCHING = "matching"                   # 简历匹配中
-    APPLIED = "applied"                     # 已申请职位
-    HR_COMMUNICATION = "hr_communication"   # HR沟通中
+    MATCHING = "matching"                   # 简历-职位匹配中
+    HR_COMMUNICATION = "hr_communication"   # HR沟通中（匹配成功后）
     INTERVIEW_SCHEDULED = "interview_scheduled"  # 面试已安排
     COMPLETED = "completed"                 # 流程完成
     ARCHIVED = "archived"                   # 已归档
@@ -372,17 +375,13 @@ class StateTransition:
             WorkflowState.IDLE,          # 未找到 → 返回空闲
         ],
         WorkflowState.MATCHING: [
-            WorkflowState.APPLIED,       # 匹配成功 → 提交申请
-            WorkflowState.SEARCHING,     # 匹配不佳 → 继续搜索
-        ],
-        WorkflowState.APPLIED: [
-            WorkflowState.HR_COMMUNICATION,  # 申请后 → 自动打招呼
-            WorkflowState.COMPLETED,         # 申请被拒 → 结束
+            WorkflowState.HR_COMMUNICATION,  # 匹配成功（≥阈值）→ 打招呼
+            WorkflowState.SEARCHING,         # 匹配不佳 → 继续搜索
+            WorkflowState.IDLE,              # 无合适职位 → 返回空闲
         ],
         WorkflowState.HR_COMMUNICATION: [
             WorkflowState.INTERVIEW_SCHEDULED,  # 获得面试 → 安排面试
             WorkflowState.COMPLETED,            # 沟通结束 → 完成
-            WorkflowState.APPLIED,              # 需要补充材料 → 回到申请
         ],
         WorkflowState.INTERVIEW_SCHEDULED: [
             WorkflowState.COMPLETED,     # 面试完成 → 结束
@@ -400,18 +399,18 @@ class StateTransition:
         return to_state in cls.TRANSITIONS.get(from_state, [])
 ```
 
-#### 2.2 关键状态转换：Job Search → HR Communication
+#### 2.2 关键状态转换：Job Search (Matching) → HR Communication
 
-**场景：用户申请职位后，自动触发 HR 沟通**
+**场景：简历-职位匹配成功（超过阈值），自动触发 HR 沟通**
 
 ```python
-async def handle_application_submitted(
+async def handle_matching_success(
     self,
     task_context: TaskContext,
-    application_result: ApplicationResult
+    match_result: MatchResult
 ):
     """
-    处理申请提交成功事件
+    处理匹配成功事件（匹配分数 ≥ 阈值）
 
     关键点：
     1. 检查状态转换合法性
@@ -433,14 +432,16 @@ async def handle_application_submitted(
     hr_context = HRCommunicationContext(
         task_id=task_context.task_id,
         user_id=task_context.user_id,
-        job_id=application_result.job_id,
-        company_name=application_result.company_name,
-        hr_contact=application_result.hr_contact,
-        application_date=datetime.now(),
+        job_id=match_result.job_id,
+        company_name=match_result.company_name,
+        job_title=match_result.job_title,
+        hr_contact=match_result.hr_contact,
+        match_score=match_result.match_score,
+        match_date=datetime.now(),
         # 继承之前的上下文
         user_profile=task_context.user_profile,
-        resume_data=task_context.resume_data,
-        cover_letter=application_result.cover_letter,
+        resume_data=match_result.resume_data,  # 从 Resume API 获取的数据
+        match_highlights=match_result.highlights,  # 匹配优势
     )
 
     # Step 3: 更新状态
@@ -448,8 +449,9 @@ async def handle_application_submitted(
         task_id=task_context.task_id,
         new_state=WorkflowState.HR_COMMUNICATION,
         metadata={
-            "trigger": "application_submitted",
-            "application_id": application_result.application_id,
+            "trigger": "matching_success",
+            "match_score": match_result.match_score,
+            "job_id": match_result.job_id,
             "transition_time": datetime.now().isoformat(),
         }
     )
@@ -464,8 +466,11 @@ async def handle_application_submitted(
         )
     )
 
-    # Step 5: 触发 HR Communication Agent（延迟24小时）
-    await self.schedule_hr_greeting(hr_context, delay_hours=24)
+    # Step 5: 触发 HR Communication Agent（可立即或延迟）
+    await self.schedule_hr_greeting(
+        hr_context,
+        delay_hours=0  # 立即发送，或设置为24表示24小时后
+    )
 
     # Step 6: 设置定期跟进任务
     await self.heartbeat_service.register_task(
@@ -478,22 +483,22 @@ async def handle_application_submitted(
 
     logger.info(
         f"State transition completed: {current_state} → HR_COMMUNICATION"
-        f" for task {task_context.task_id}"
+        f" for task {task_context.task_id}, match_score: {match_result.match_score}"
     )
 
 async def schedule_hr_greeting(
     self,
     hr_context: HRCommunicationContext,
-    delay_hours: int = 24
+    delay_hours: int = 0
 ):
     """
     安排 HR 打招呼任务
 
     策略：
-    - 申请提交后 24 小时自动发送初次联系
+    - 匹配成功后立即或延迟发送初次联系
     - 使用礼貌、专业的语气
-    - 表达对职位的兴趣
-    - 附上关键信息
+    - 突出匹配优势和用户亮点
+    - 简洁表达对职位的兴趣
     """
 
     # 从 HR Communication Agent Pool 获取智能体
@@ -505,26 +510,39 @@ async def schedule_hr_greeting(
             company_name=hr_context.company_name,
             job_title=hr_context.job_title,
             user_name=hr_context.user_profile.name,
-            highlights=hr_context.resume_data.key_achievements[:3],
+            match_score=hr_context.match_score,
+            highlights=hr_context.match_highlights,  # 匹配优势
         )
 
-        # 延迟发送（24小时后）
-        await self.scheduler.schedule_task(
-            task_name=f"hr_greeting_{hr_context.task_id}",
-            execute_at=datetime.now() + timedelta(hours=delay_hours),
-            task_func=hr_agent.send_message,
-            task_args={
-                "recipient": hr_context.hr_contact,
-                "subject": f"Following up on {hr_context.job_title} Application",
-                "message": greeting_message,
-                "context": hr_context,
-            }
-        )
-
-        logger.info(
-            f"HR greeting scheduled for {delay_hours} hours later "
-            f"(task: {hr_context.task_id})"
-        )
+        if delay_hours > 0:
+            # 延迟发送
+            await self.scheduler.schedule_task(
+                task_name=f"hr_greeting_{hr_context.task_id}",
+                execute_at=datetime.now() + timedelta(hours=delay_hours),
+                task_func=hr_agent.send_message,
+                task_args={
+                    "recipient": hr_context.hr_contact,
+                    "subject": f"Interest in {hr_context.job_title} Position",
+                    "message": greeting_message,
+                    "context": hr_context,
+                }
+            )
+            logger.info(
+                f"HR greeting scheduled for {delay_hours} hours later "
+                f"(task: {hr_context.task_id})"
+            )
+        else:
+            # 立即发送
+            await hr_agent.send_message(
+                recipient=hr_context.hr_contact,
+                subject=f"Interest in {hr_context.job_title} Position",
+                message=greeting_message,
+                context=hr_context,
+            )
+            logger.info(
+                f"HR greeting sent immediately "
+                f"(task: {hr_context.task_id})"
+            )
 
     finally:
         # 归还智能体到池
@@ -535,26 +553,28 @@ async def schedule_hr_greeting(
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Job Search Agent (完成申请)                                │
+│  Job Search Agent (匹配成功，分数 ≥ 阈值)                  │
 │                                                              │
 │  输出数据包：                                                │
-│  ├─ application_id                                          │
-│  ├─ job_details (公司、职位、HR联系方式)                    │
-│  ├─ application_materials (简历、求职信)                    │
-│  └─ application_status: "submitted"                         │
+│  ├─ job_id & job_details (公司、职位、HR联系方式)          │
+│  ├─ match_score (例如 0.82, 超过阈值 0.75)                 │
+│  ├─ match_highlights (匹配优势，如技能匹配、经验匹配)      │
+│  ├─ resume_data (从 Resume API 获取的结构化数据)           │
+│  └─ match_status: "success"                                 │
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Task Orchestrator (状态转换控制器)                         │
 │                                                              │
-│  1. 验证转换合法性 ✓                                        │
+│  1. 验证转换合法性 ✓ (MATCHING → HR_COMMUNICATION)        │
 │  2. 构建 HR Communication Context                           │
 │     - 继承 Job Search 上下文                                │
-│     - 添加 HR 特定信息                                      │
+│     - 添加匹配结果（分数、亮点）                            │
+│     - 添加 HR 联系信息                                      │
 │  3. 更新 State Store                                        │
 │  4. 发布状态转换事件                                        │
-│  5. 触发 HR Agent 初始化                                    │
+│  5. 触发 HR Agent 初始化（立即或延迟）                     │
 └─────────────┬───────────────────────────────────────────────┘
               │
               ▼
@@ -565,13 +585,18 @@ async def schedule_hr_greeting(
 │  ├─ hr_context (完整上下文)                                 │
 │  ├─ user_profile (用户档案)                                 │
 │  ├─ job_details (职位详情)                                  │
-│  └─ application_materials (申请材料)                        │
+│  ├─ match_score & highlights (匹配结果)                     │
+│  └─ resume_data (用户简历数据)                              │
 │                                                              │
 │  执行任务：                                                  │
-│  1. 24小时后发送初次打招呼                                  │
-│  2. 每3天检查申请状态                                       │
+│  1. 立即或延迟发送初次打招呼消息                            │
+│     - 突出匹配优势（例如："我的技能与您的要求匹配度82%"）   │
+│     - 表达对职位的兴趣                                       │
+│     - 专业且友好的语气                                       │
+│  2. 每3天检查沟通状态                                       │
 │  3. 收到回复 → 及时响应                                     │
 │  4. 7天无回复 → 发送礼貌跟进                                │
+│  5. 获得面试邀请 → 自动确认并安排                          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
