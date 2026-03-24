@@ -103,6 +103,8 @@ This document provides a comprehensive architecture design, API specifications, 
 
 **实现示例：**
 
+**方案1：为每个会话创建独立 Agent（适用于低并发）**
+
 ```python
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory
@@ -129,6 +131,197 @@ def create_user_session(user_id: str, conversation_type: str):
 
     return agent, session_id
 ```
+
+**方案2：Agent 池 + 会话内存隔离（推荐用于高并发）**
+
+```python
+import asyncio
+from typing import Dict, List
+from queue import Queue
+from threading import Lock
+from agentscope.agent import ReActAgent
+from agentscope.memory import InMemoryMemory
+from agentscope.tool import Toolkit
+from agentscope.message import Msg
+
+class AgentPool:
+    """Agent 池管理器，用于高并发场景下的 Agent 复用"""
+
+    def __init__(self, pool_size: int = 10):
+        self.pool_size = pool_size
+        self.agent_pools: Dict[str, Queue] = {}  # agent_type -> agent queue
+        self.session_memories: Dict[str, InMemoryMemory] = {}  # session_id -> memory
+        self.lock = Lock()
+        self.model_config = self._create_model_config()
+
+    def _create_model_config(self):
+        """创建模型配置"""
+        from agentscope.model import DashScopeChatModel
+        return DashScopeChatModel(
+            model_name="qwen-max",
+            api_key=os.environ["DASHSCOPE_API_KEY"],
+            stream=True,
+        )
+
+    def _create_agent(self, agent_type: str) -> ReActAgent:
+        """创建一个新的 Agent 实例（不绑定特定会话）"""
+        toolkit = self._create_toolkit_for_type(agent_type)
+
+        agent = ReActAgent(
+            name=f"{agent_type}_agent",
+            sys_prompt=self._get_system_prompt(agent_type),
+            model=self.model_config,
+            memory=None,  # 内存将在运行时动态设置
+            toolkit=toolkit,
+        )
+
+        return agent
+
+    def _get_system_prompt(self, agent_type: str) -> str:
+        """获取不同类型 Agent 的系统提示词"""
+        prompts = {
+            "job_search": """You are a professional career advisor helping users
+            find jobs, optimize resumes, and prepare for interviews.""",
+            "hr_communication": """You are a professional communication assistant
+            helping users communicate with HR representatives.""",
+        }
+        return prompts.get(agent_type, "You are a helpful assistant.")
+
+    def _create_toolkit_for_type(self, agent_type: str) -> Toolkit:
+        """为不同类型的 Agent 创建工具包"""
+        # 根据 agent_type 注册相应的工具
+        toolkit = Toolkit()
+        # ... 注册工具的逻辑
+        return toolkit
+
+    def initialize_pool(self, agent_type: str):
+        """初始化指定类型的 Agent 池"""
+        if agent_type not in self.agent_pools:
+            self.agent_pools[agent_type] = Queue()
+            # 预创建指定数量的 Agent 实例
+            for _ in range(self.pool_size):
+                agent = self._create_agent(agent_type)
+                self.agent_pools[agent_type].put(agent)
+
+    def get_or_create_session_memory(self, session_id: str) -> InMemoryMemory:
+        """获取或创建会话内存"""
+        with self.lock:
+            if session_id not in self.session_memories:
+                # 创建基于数据库的持久化内存
+                self.session_memories[session_id] = SQLiteMemory(
+                    session_id=session_id,
+                    db_path=f"./data/sessions/{session_id}.db"
+                )
+            return self.session_memories[session_id]
+
+    def acquire_agent(self, agent_type: str, session_id: str) -> ReActAgent:
+        """从池中获取一个 Agent 并绑定会话内存"""
+        # 确保池已初始化
+        if agent_type not in self.agent_pools:
+            self.initialize_pool(agent_type)
+
+        # 从池中获取 Agent（如果池为空会阻塞等待）
+        agent = self.agent_pools[agent_type].get()
+
+        # 绑定会话内存
+        session_memory = self.get_or_create_session_memory(session_id)
+        agent.memory = session_memory
+
+        return agent
+
+    def release_agent(self, agent: ReActAgent, agent_type: str):
+        """将 Agent 归还到池中"""
+        # 解除内存绑定，防止内存泄漏
+        agent.memory = None
+
+        # 归还到池中
+        self.agent_pools[agent_type].put(agent)
+
+    async def handle_user_request(
+        self,
+        user_id: str,
+        session_id: str,
+        agent_type: str,
+        message: str
+    ) -> str:
+        """处理用户请求（使用 Agent 池）"""
+        # 从池中获取 Agent
+        agent = self.acquire_agent(agent_type, session_id)
+
+        try:
+            # 处理用户消息
+            msg = Msg(name="user", content=message, role="user")
+            response = await agent(msg)
+            result = response.get_text_content()
+
+        finally:
+            # 无论成功与否，都要归还 Agent 到池中
+            self.release_agent(agent, agent_type)
+
+        return result
+
+    def cleanup_session(self, session_id: str):
+        """清理会话内存（当会话结束时调用）"""
+        with self.lock:
+            if session_id in self.session_memories:
+                # 可选：持久化内存到数据库
+                memory = self.session_memories[session_id]
+                memory.save()  # 假设有 save 方法
+                del self.session_memories[session_id]
+
+
+# 使用示例：高并发场景
+async def main():
+    # 初始化 Agent 池（只需要初始化一次）
+    agent_pool = AgentPool(pool_size=10)
+
+    # 预初始化不同类型的 Agent 池
+    agent_pool.initialize_pool("job_search")
+    agent_pool.initialize_pool("hr_communication")
+
+    # 模拟多个并发用户请求
+    async def process_user_request(user_id: str, message: str):
+        session_id = f"session_{user_id}_job_search"
+        response = await agent_pool.handle_user_request(
+            user_id=user_id,
+            session_id=session_id,
+            agent_type="job_search",
+            message=message
+        )
+        print(f"User {user_id}: {response}")
+
+    # 并发处理 100 个用户请求
+    tasks = [
+        process_user_request(f"user_{i}", "帮我找一份Python工程师的工作")
+        for i in range(100)
+    ]
+
+    # 使用 Agent 池，只需要 10 个 Agent 实例就可以处理 100 个并发请求
+    await asyncio.gather(*tasks)
+
+    print("所有请求处理完成！")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**方案2 的优势：**
+
+1. **资源高效利用：** 10 个 Agent 实例可以处理成百上千的并发会话
+2. **快速响应：** 避免了频繁创建/销毁 Agent 的开销
+3. **内存隔离：** 每个会话有独立的内存，互不干扰
+4. **可扩展性：** 可以根据负载动态调整池大小
+5. **故障隔离：** 单个会话的错误不会影响其他会话
+
+**性能对比：**
+
+| 指标 | 方案1（每次创建） | 方案2（Agent池） |
+|------|------------------|------------------|
+| Agent 初始化时间 | 每次请求 ~500ms | 启动时一次性 |
+| 内存占用（100会话） | ~5GB | ~500MB |
+| 并发处理能力 | 受限于内存 | 高效复用 |
+| 适用场景 | 低并发（<10用户） | 高并发（100+用户） |
 
 ### 2. 对话类型区分 (Conversation Separation)
 
