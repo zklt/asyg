@@ -72,14 +72,11 @@ This document provides a comprehensive architecture design, API specifications, 
 │  │              Heartbeat & Scheduler Service                         │  │
 │  │                                                                     │  │
 │  │  定期任务 (Periodic Tasks):                                        │  │
-│  │  ├─ 每日职位推荐 (Daily Job Recommendations)                      │  │
-│  │  ├─ 申请状态跟进 (Application Follow-ups)                         │  │
-│  │  ├─ 面试提醒 (Interview Reminders)                                │  │
+│  │  ├─ 每日职位投递 (Daily Job Recommendations)                      │  │
 │  │  └─ HR 沟通跟进 (HR Communication Follow-ups)                     │  │
 │  │                                                                     │  │
 │  │  事件触发 (Event-Driven):                                          │  │
 │  │  ├─ 新职位匹配 → 自动推送                                         │  │
-│  │  ├─ 申请状态变化 → 通知用户                                       │  │
 │  │  ├─ 简历浏览 → 自动打招呼                                         │  │
 │  │  └─ 面试邀请 → 自动确认 + 日程安排                               │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
@@ -113,8 +110,8 @@ This document provides a comprehensive architecture design, API specifications, 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │              External Services & Integrations                            │
 │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────────┐ │
-│  │ Multimodal   │ │ Calendar API │ │ Job Board    │ │ Email/SMS     │ │
-│  │ LLM          │ │ (Google/     │ │ APIs         │ │ Notification  │ │
+│  │ Multimodal   │ │ Calendar API │ │ Job Board    │ │               │ │
+│  │ LLM          │ │ (Google/     │ │ APIs         │ │               │ │
 │  │ (GPT-4V/     │ │  Apple)      │ │              │ │               │ │
 │  │  Qwen-VL)    │ │              │ │              │ │               │ │
 │  └──────────────┘ └──────────────┘ └──────────────┘ └───────────────┘ │
@@ -254,7 +251,6 @@ async def batch_job_matching(
 │  └─ 智能过滤和排序
 ├─ 职位详情分析
 │  ├─ 提取职位要求
-│  ├─ 分析公司文化
 │  └─ 薪资水平评估
 ├─ 简历解析与匹配
 │  ├─ 调用 Resume API 解析用户简历
@@ -263,7 +259,6 @@ async def batch_job_matching(
 │  └─ 生成匹配分数
 └─ 匹配决策
    ├─ 判断是否超过匹配阈值（例如 75%）
-   ├─ 生成匹配报告
    └─ 触发状态转换 → HR_COMMUNICATION
 
 工具调用：
@@ -298,9 +293,7 @@ API 依赖：
 主要功能：
 ├─ 消息起草与发送
 │  ├─ 初次联系消息（打招呼）
-│  ├─ 跟进提醒
 │  ├─ 面试确认
-│  └─ 感谢信
 ├─ 沟通历史管理
 │  ├─ 记录所有往来
 │  ├─ 关键信息提取
@@ -308,14 +301,8 @@ API 依赖：
 │  └─ 响应时效监控
 ├─ 面试协调
 │  ├─ 日程安排
-│  ├─ 会议室/视频会议预定
-│  ├─ 提醒通知
-│  └─ 重新安排
-└─ 自动化跟进
-   ├─ 定期状态查询
-   ├─ 无回复提醒
-   ├─ Offer 谈判辅助
-   └─ 入职准备
+
+
 
 工具调用：
 - send_hr_message()              # 发送HR消息
@@ -335,9 +322,6 @@ API 依赖：
    - 简洁表达兴趣
 3. 发送消息给 HR（可设置延迟，例如立即或24小时后）
 4. 注册心跳任务进行自动跟进
-   - 每3天检查申请状态
-   - 7天无回复自动发送礼貌跟进
-   - 最多跟进5次（15天）
 5. 处理 HR 回复和后续沟通
 6. 面试邀请的自动确认和日程安排
 
@@ -361,8 +345,7 @@ class WorkflowState(Enum):
     HR_COMMUNICATION = "hr_communication"   # HR沟通中（匹配成功后）
     INTERVIEW_SCHEDULED = "interview_scheduled"  # 面试已安排
     COMPLETED = "completed"                 # 流程完成
-    ARCHIVED = "archived"                   # 已归档
-    FAILED = "failed"                       # 流程失败
+
 
 class StateTransition:
     """状态转换规则"""
@@ -385,10 +368,6 @@ class StateTransition:
         ],
         WorkflowState.INTERVIEW_SCHEDULED: [
             WorkflowState.COMPLETED,     # 面试完成 → 结束
-        ],
-        WorkflowState.COMPLETED: [
-            WorkflowState.ARCHIVED,      # 归档
-            WorkflowState.IDLE,          # 重新开始
         ],
     }
 
@@ -587,16 +566,14 @@ async def schedule_hr_greeting(
 │  ├─ job_details (职位详情)                                  │
 │  ├─ match_score & highlights (匹配结果)                     │
 │  └─ resume_data (用户简历数据)                              │
-│                                                              │
-│  执行任务：                                                  │
-│  1. 立即或延迟发送初次打招呼消息                            │
-│     - 突出匹配优势（例如："我的技能与您的要求匹配度82%"）   │
+│                                                           │
+│  执行任务：                                                 │
+│  1. 立即或延迟发送初次打招呼消息                               │
+│     - 突出匹配优势（例如："我的技能与您的要求匹配度82%"）         │
 │     - 表达对职位的兴趣                                       │
 │     - 专业且友好的语气                                       │
-│  2. 每3天检查沟通状态                                       │
-│  3. 收到回复 → 及时响应                                     │
-│  4. 7天无回复 → 发送礼貌跟进                                │
-│  5. 获得面试邀请 → 自动确认并安排                          │
+│  2. 收到回复 → 及时响应                                       │
+│  3. 获得面试邀请 → 自动确认并安排                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -915,99 +892,6 @@ await heartbeat_service.register_task(
 )
 ```
 
-**面试提醒（Interview Reminders）**
-
-```python
-async def interview_reminder_handler(
-    agent: HRCommunicationAgent,
-    context: dict
-) -> dict:
-    """
-    面试提醒任务
-
-    执行时间：
-    - 面试前24小时
-    - 面试前1小时
-    智能体：HR Communication Agent
-    """
-    interview_id = context["interview_id"]
-    reminder_type = context["reminder_type"]  # "24h" or "1h"
-
-    interview = await get_interview_details(interview_id)
-
-    if reminder_type == "24h":
-        message = f"""
-        明天您有一场面试！
-
-        📅 时间：{interview.datetime}
-        🏢 公司：{interview.company_name}
-        💼 职位：{interview.job_title}
-        📍 地点：{interview.location or interview.meeting_link}
-
-        准备建议：
-        1. 复习职位描述和公司背景
-        2. 准备常见面试问题的回答
-        3. 准备2-3个问题问面试官
-        4. 检查设备和网络（如果是远程面试）
-
-        祝您面试顺利！🎉
-        """
-    else:  # 1h
-        message = f"""
-        ⏰ 提醒：1小时后您有面试！
-
-        📅 时间：{interview.datetime}
-        🏢 公司：{interview.company_name}
-        💼 职位：{interview.job_title}
-        📍 地点：{interview.location or interview.meeting_link}
-
-        请确保已准备就绪！
-        """
-
-    await send_notification(
-        user_id=interview.user_id,
-        title=f"面试提醒 - {interview.company_name}",
-        message=message,
-        priority="high",
-    )
-
-    return {"status": "reminder_sent", "type": reminder_type}
-
-# 面试安排时自动注册提醒任务
-async def schedule_interview_reminders(interview: Interview):
-    """安排面试提醒"""
-
-    # 24小时提醒
-    reminder_24h_time = interview.datetime - timedelta(hours=24)
-    await heartbeat_service.register_task(
-        task_id=f"interview_reminder_24h_{interview.id}",
-        task_type="interview_reminder",
-        schedule=reminder_24h_time.strftime("%M %H %d %m *"),  # Cron格式
-        agent_type="hr_communication",
-        task_handler=interview_reminder_handler,
-        context={
-            "interview_id": interview.id,
-            "reminder_type": "24h",
-        },
-        max_attempts=1,
-    )
-
-    # 1小时提醒
-    reminder_1h_time = interview.datetime - timedelta(hours=1)
-    await heartbeat_service.register_task(
-        task_id=f"interview_reminder_1h_{interview.id}",
-        task_type="interview_reminder",
-        schedule=reminder_1h_time.strftime("%M %H %d %m *"),
-        agent_type="hr_communication",
-        task_handler=interview_reminder_handler,
-        context={
-            "interview_id": interview.id,
-            "reminder_type": "1h",
-        },
-        max_attempts=1,
-    )
-```
-
 **事件驱动的自动化任务**
 
 ```python
@@ -1032,12 +916,6 @@ class EventDrivenAutomation:
         self.event_bus.subscribe(
             event_type="interview_invitation_received",
             handler=self.handle_interview_invitation,
-        )
-
-        # 申请状态变化 → 通知用户
-        self.event_bus.subscribe(
-            event_type="application_status_changed",
-            handler=self.handle_application_status_change,
         )
 
         # 新职位匹配 → 自动推送
@@ -2128,618 +2006,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
 ---
 
-## REST API 接口定义 (REST API Specifications)
-
-### 用户认证 API (Authentication APIs)
-
-#### 1. 用户注册
-```
-POST /api/v1/auth/register
-Content-Type: application/json
-
-Request:
-{
-    "email": "user@example.com",
-    "password": "secure_password",
-    "phone": "+1234567890",
-    "name": "John Doe"
-}
-
-Response:
-{
-    "user_id": "usr_123456",
-    "token": "jwt_token_here",
-    "expires_at": "2026-03-24T10:00:00Z"
-}
-```
-
-#### 2. 用户登录
-```
-POST /api/v1/auth/login
-Content-Type: application/json
-
-Request:
-{
-    "email": "user@example.com",
-    "password": "secure_password"
-}
-
-Response:
-{
-    "user_id": "usr_123456",
-    "token": "jwt_token_here",
-    "refresh_token": "refresh_token_here",
-    "expires_at": "2026-03-24T10:00:00Z"
-}
-```
-
-#### 3. Token 刷新
-```
-POST /api/v1/auth/refresh
-Content-Type: application/json
-Authorization: Bearer {refresh_token}
-
-Response:
-{
-    "token": "new_jwt_token",
-    "expires_at": "2026-03-24T12:00:00Z"
-}
-```
-
-### 会话管理 API (Session Management APIs)
-
-#### 4. 创建会话
-```
-POST /api/v1/sessions/create
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "conversation_type": "job_search",  // 或 "hr_communication"
-    "context": {
-        "job_preferences": ["software engineer", "remote"]
-    }
-}
-
-Response:
-{
-    "session_id": "sess_789012",
-    "agent_name": "JobSearchAssistant",
-    "created_at": "2026-03-23T10:30:00Z"
-}
-```
-
-#### 5. 获取会话列表
-```
-GET /api/v1/sessions?user_id={user_id}&type={conversation_type}
-Authorization: Bearer {token}
-
-Response:
-{
-    "sessions": [
-        {
-            "session_id": "sess_789012",
-            "conversation_type": "job_search",
-            "created_at": "2026-03-23T10:30:00Z",
-            "last_activity": "2026-03-23T11:00:00Z",
-            "message_count": 15
-        }
-    ],
-    "total": 1
-}
-```
-
-#### 6. 删除会话
-```
-DELETE /api/v1/sessions/{session_id}
-Authorization: Bearer {token}
-
-Response:
-{
-    "success": true,
-    "message": "Session deleted successfully"
-}
-```
-
-### 对话交互 API (Conversation APIs)
-
-#### 7. 发送消息
-```
-POST /api/v1/chat/message
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "session_id": "sess_789012",
-    "message": "帮我找一份软件工程师的工作",
-    "attachments": [
-        {
-            "type": "image",
-            "data": "base64_encoded_resume_image",
-            "filename": "resume.pdf"
-        }
-    ]
-}
-
-Response:
-{
-    "message_id": "msg_345678",
-    "agent_response": "我会帮您搜索软件工程师职位。首先，让我分析一下您的简历...",
-    "actions_taken": [
-        {
-            "tool": "analyze_resume",
-            "status": "completed"
-        }
-    ],
-    "suggestions": [
-        "您的简历中可以突出更多项目经验",
-        "建议添加技术栈关键词"
-    ],
-    "timestamp": "2026-03-23T11:05:00Z"
-}
-```
-
-#### 8. 获取对话历史
-```
-GET /api/v1/chat/history?session_id={session_id}&limit={limit}&offset={offset}
-Authorization: Bearer {token}
-
-Response:
-{
-    "messages": [
-        {
-            "message_id": "msg_345678",
-            "role": "user",
-            "content": "帮我找一份软件工程师的工作",
-            "timestamp": "2026-03-23T11:00:00Z"
-        },
-        {
-            "message_id": "msg_345679",
-            "role": "assistant",
-            "content": "我会帮您搜索软件工程师职位...",
-            "timestamp": "2026-03-23T11:05:00Z"
-        }
-    ],
-    "total": 15,
-    "has_more": true
-}
-```
-
-#### 9. 流式响应 (Server-Sent Events)
-```
-GET /api/v1/chat/stream?session_id={session_id}&message_id={message_id}
-Authorization: Bearer {token}
-
-Response (SSE Stream):
-data: {"type": "token", "content": "我会"}
-data: {"type": "token", "content": "帮您"}
-data: {"type": "token", "content": "搜索"}
-data: {"type": "tool_call", "tool": "search_jobs", "status": "started"}
-data: {"type": "tool_result", "tool": "search_jobs", "status": "completed"}
-data: {"type": "done"}
-```
-
-### 求职功能 API (Job Search APIs)
-
-#### 10. 搜索职位
-```
-GET /api/v1/jobs/search?keywords={keywords}&location={location}&salary_min={amount}
-Authorization: Bearer {token}
-
-Response:
-{
-    "jobs": [
-        {
-            "job_id": "job_111222",
-            "title": "Senior Software Engineer",
-            "company": "TechCorp",
-            "location": "San Francisco, CA",
-            "salary_range": "$120k - $180k",
-            "posted_date": "2026-03-20",
-            "match_score": 0.92,
-            "description": "We are looking for...",
-            "requirements": ["Python", "AWS", "5+ years experience"]
-        }
-    ],
-    "total": 150,
-    "page": 1,
-    "per_page": 10
-}
-```
-
-#### 11. 获取职位详情
-```
-GET /api/v1/jobs/{job_id}
-Authorization: Bearer {token}
-
-Response:
-{
-    "job_id": "job_111222",
-    "title": "Senior Software Engineer",
-    "company": "TechCorp",
-    "location": "San Francisco, CA",
-    "salary_range": "$120k - $180k",
-    "employment_type": "Full-time",
-    "remote_option": true,
-    "posted_date": "2026-03-20",
-    "application_deadline": "2026-04-20",
-    "description": "Full job description...",
-    "requirements": ["Python", "AWS", "5+ years experience"],
-    "benefits": ["Health insurance", "401k", "Stock options"],
-    "company_info": {
-        "size": "1000-5000",
-        "industry": "Technology",
-        "website": "https://techcorp.com"
-    }
-}
-```
-
-#### 12. 申请职位
-```
-POST /api/v1/jobs/apply
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "job_id": "job_111222",
-    "user_id": "usr_123456",
-    "resume_id": "resume_001",
-    "cover_letter": "Dear Hiring Manager...",
-    "additional_info": {
-        "available_start_date": "2026-05-01",
-        "willing_to_relocate": true
-    }
-}
-
-Response:
-{
-    "application_id": "app_999888",
-    "status": "submitted",
-    "submitted_at": "2026-03-23T11:30:00Z",
-    "confirmation_email_sent": true
-}
-```
-
-#### 13. 获取申请状态
-```
-GET /api/v1/applications?user_id={user_id}&status={status}
-Authorization: Bearer {token}
-
-Response:
-{
-    "applications": [
-        {
-            "application_id": "app_999888",
-            "job_id": "job_111222",
-            "job_title": "Senior Software Engineer",
-            "company": "TechCorp",
-            "status": "under_review",
-            "applied_at": "2026-03-23T11:30:00Z",
-            "last_updated": "2026-03-23T14:00:00Z",
-            "next_steps": "HR will contact you within 5 business days"
-        }
-    ],
-    "total": 5
-}
-```
-
-### 简历管理 API (Resume Management APIs)
-
-#### 14. 上传简历
-```
-POST /api/v1/resumes/upload
-Content-Type: multipart/form-data
-Authorization: Bearer {token}
-
-Request:
-- file: resume.pdf
-- user_id: usr_123456
-
-Response:
-{
-    "resume_id": "resume_001",
-    "filename": "resume.pdf",
-    "parsed_data": {
-        "name": "John Doe",
-        "email": "john@example.com",
-        "skills": ["Python", "JavaScript", "AWS"],
-        "experience_years": 5,
-        "education": [...]
-    },
-    "analysis": {
-        "completeness_score": 0.85,
-        "suggestions": ["Add more quantifiable achievements"]
-    }
-}
-```
-
-#### 15. 分析简历
-```
-POST /api/v1/resumes/analyze
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "resume_id": "resume_001",
-    "target_job_id": "job_111222"
-}
-
-Response:
-{
-    "match_score": 0.87,
-    "strengths": [
-        "Strong technical skills match",
-        "Relevant experience in similar companies"
-    ],
-    "gaps": [
-        "Missing AWS certification mentioned in job requirements",
-        "Limited leadership experience"
-    ],
-    "recommendations": [
-        "Highlight your cloud infrastructure projects more prominently",
-        "Add metrics to demonstrate impact (e.g., '减少部署时间50%')"
-    ],
-    "keyword_match": {
-        "matched": ["Python", "Docker", "CI/CD"],
-        "missing": ["Kubernetes", "Terraform"]
-    }
-}
-```
-
-#### 16. 优化简历
-```
-POST /api/v1/resumes/optimize
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "resume_id": "resume_001",
-    "target_job_id": "job_111222",
-    "optimization_focus": ["keywords", "formatting", "achievements"]
-}
-
-Response:
-{
-    "optimized_resume_id": "resume_002",
-    "changes_made": [
-        {
-            "section": "work_experience",
-            "original": "Worked on backend systems",
-            "optimized": "Architected and implemented scalable backend systems serving 1M+ users, reducing API response time by 40%"
-        }
-    ],
-    "download_url": "/api/v1/resumes/download/resume_002"
-}
-```
-
-### 日历管理 API (Calendar APIs)
-
-#### 17. 创建日历事件
-```
-POST /api/v1/calendar/events
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "user_id": "usr_123456",
-    "title": "Interview with TechCorp",
-    "description": "Technical interview for Senior SWE position",
-    "date": "2026-03-25",
-    "time": "14:00",
-    "duration_minutes": 60,
-    "location": "Zoom Meeting",
-    "meeting_link": "https://zoom.us/j/123456789",
-    "reminders": [
-        {"minutes_before": 60, "method": "notification"},
-        {"minutes_before": 1440, "method": "email"}
-    ]
-}
-
-Response:
-{
-    "event_id": "evt_555666",
-    "created": true,
-    "calendar_provider": "google",
-    "event_url": "https://calendar.google.com/event?eid=..."
-}
-```
-
-#### 18. 查询日历事件
-```
-GET /api/v1/calendar/events?user_id={user_id}&start_date={date}&end_date={date}
-Authorization: Bearer {token}
-
-Response:
-{
-    "events": [
-        {
-            "event_id": "evt_555666",
-            "title": "Interview with TechCorp",
-            "date": "2026-03-25",
-            "time": "14:00",
-            "duration_minutes": 60,
-            "status": "confirmed",
-            "related_job_id": "job_111222"
-        }
-    ],
-    "total": 3
-}
-```
-
-#### 19. 更新/取消事件
-```
-PATCH /api/v1/calendar/events/{event_id}
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "status": "cancelled",
-    "cancellation_reason": "Interview rescheduled"
-}
-
-Response:
-{
-    "event_id": "evt_555666",
-    "status": "cancelled",
-    "updated_at": "2026-03-24T10:00:00Z"
-}
-```
-
-### HR 沟通 API (HR Communication APIs)
-
-#### 20. 发送消息给 HR
-```
-POST /api/v1/hr/messages
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "user_id": "usr_123456",
-    "job_id": "job_111222",
-    "recipient_hr_id": "hr_777888",
-    "subject": "Question about the position",
-    "message": "I would like to know more about...",
-    "priority": "normal"
-}
-
-Response:
-{
-    "message_id": "hrmsg_123123",
-    "status": "sent",
-    "sent_at": "2026-03-23T12:00:00Z",
-    "expected_response_time": "24-48 hours"
-}
-```
-
-#### 21. 获取 HR 消息历史
-```
-GET /api/v1/hr/messages?user_id={user_id}&job_id={job_id}
-Authorization: Bearer {token}
-
-Response:
-{
-    "messages": [
-        {
-            "message_id": "hrmsg_123123",
-            "from": "user",
-            "to": "hr",
-            "subject": "Question about the position",
-            "message": "I would like to know more about...",
-            "timestamp": "2026-03-23T12:00:00Z",
-            "read": true
-        },
-        {
-            "message_id": "hrmsg_123124",
-            "from": "hr",
-            "to": "user",
-            "subject": "Re: Question about the position",
-            "message": "Thank you for your interest...",
-            "timestamp": "2026-03-24T09:00:00Z",
-            "read": false
-        }
-    ]
-}
-```
-
-### 通知 API (Notification APIs)
-
-#### 22. 获取通知
-```
-GET /api/v1/notifications?user_id={user_id}&unread_only={boolean}
-Authorization: Bearer {token}
-
-Response:
-{
-    "notifications": [
-        {
-            "notification_id": "notif_444555",
-            "type": "application_status_update",
-            "title": "Application Status Update",
-            "message": "Your application to TechCorp has been reviewed",
-            "related_entity": {
-                "type": "application",
-                "id": "app_999888"
-            },
-            "priority": "high",
-            "read": false,
-            "created_at": "2026-03-23T14:00:00Z"
-        }
-    ],
-    "unread_count": 3
-}
-```
-
-#### 23. 标记通知已读
-```
-POST /api/v1/notifications/{notification_id}/read
-Authorization: Bearer {token}
-
-Response:
-{
-    "success": true,
-    "notification_id": "notif_444555",
-    "read_at": "2026-03-23T15:00:00Z"
-}
-```
-
-### 用户配置 API (User Profile APIs)
-
-#### 24. 获取用户资料
-```
-GET /api/v1/users/{user_id}/profile
-Authorization: Bearer {token}
-
-Response:
-{
-    "user_id": "usr_123456",
-    "name": "John Doe",
-    "email": "john@example.com",
-    "phone": "+1234567890",
-    "job_preferences": {
-        "desired_roles": ["Software Engineer", "DevOps Engineer"],
-        "locations": ["San Francisco", "Remote"],
-        "salary_min": 120000,
-        "employment_type": ["full-time", "contract"],
-        "remote_preference": "remote_only"
-    },
-    "skills": ["Python", "AWS", "Docker"],
-    "experience_years": 5,
-    "current_resume_id": "resume_001"
-}
-```
-
-#### 25. 更新用户资料
-```
-PATCH /api/v1/users/{user_id}/profile
-Content-Type: application/json
-Authorization: Bearer {token}
-
-Request:
-{
-    "job_preferences": {
-        "desired_roles": ["Senior Software Engineer"],
-        "salary_min": 150000
-    }
-}
-
-Response:
-{
-    "success": true,
-    "updated_fields": ["job_preferences"],
-    "updated_at": "2026-03-23T16:00:00Z"
-}
-```
-
----
-
 ## AgentScope 工具定义 (Tool Specifications)
 
 ### 1. 求职搜索工具 (Job Search Tools)
@@ -2790,101 +2056,7 @@ async def get_job_details(job_id: str) -> dict:
     pass
 ```
 
-#### get_company_info
-```python
-async def get_company_info(company_name: str) -> dict:
-    """Fetch information about a company.
-
-    Args:
-        company_name: Name of the company
-
-    Returns:
-        dict: Company information including size, industry, culture, reviews
-    """
-    pass
-```
-
-#### get_salary_insights
-```python
-async def get_salary_insights(
-    job_title: str,
-    location: str,
-    experience_years: int
-) -> dict:
-    """Get salary insights for a specific role.
-
-    Args:
-        job_title: The job title to research
-        location: Location for salary comparison
-        experience_years: Years of experience
-
-    Returns:
-        dict: Salary ranges, percentiles, and market trends
-    """
-    pass
-```
-
 ### 2. 简历处理工具 (Resume Tools)
-
-#### analyze_resume
-```python
-async def analyze_resume(
-    resume_id: str,
-    target_job_id: str = ""
-) -> dict:
-    """Analyze a resume and provide feedback.
-
-    Args:
-        resume_id: The ID of the resume to analyze
-        target_job_id: Optional job ID to compare against
-
-    Returns:
-        dict: Analysis results with scores, strengths, gaps, recommendations
-    """
-    pass
-```
-
-#### optimize_resume_section
-```python
-async def optimize_resume_section(
-    resume_id: str,
-    section: str,
-    target_keywords: list[str]
-) -> dict:
-    """Optimize a specific section of the resume.
-
-    Args:
-        resume_id: The ID of the resume
-        section: Section to optimize (summary, experience, skills, education)
-        target_keywords: Keywords to incorporate
-
-    Returns:
-        dict: Optimized content with before/after comparison
-    """
-    pass
-```
-
-#### generate_cover_letter
-```python
-async def generate_cover_letter(
-    user_id: str,
-    job_id: str,
-    tone: str = "professional",
-    highlights: list[str] = []
-) -> str:
-    """Generate a personalized cover letter for a job application.
-
-    Args:
-        user_id: The user's ID
-        job_id: The job posting ID
-        tone: Desired tone (professional, enthusiastic, casual)
-        highlights: Specific achievements to highlight
-
-    Returns:
-        str: Generated cover letter content
-    """
-    pass
-```
 
 #### parse_resume_from_file
 ```python
@@ -2900,66 +2072,6 @@ async def parse_resume_from_file(
 
     Returns:
         dict: Parsed resume data (contact info, experience, skills, education)
-    """
-    pass
-```
-
-### 3. 申请管理工具 (Application Tools)
-
-#### submit_job_application
-```python
-async def submit_job_application(
-    user_id: str,
-    job_id: str,
-    resume_id: str,
-    cover_letter: str = "",
-    additional_info: dict = {}
-) -> dict:
-    """Submit a job application.
-
-    Args:
-        user_id: The user's ID
-        job_id: The job posting ID
-        resume_id: The resume to use
-        cover_letter: Optional cover letter
-        additional_info: Additional information (start date, relocate, etc.)
-
-    Returns:
-        dict: Application confirmation with application_id and status
-    """
-    pass
-```
-
-#### track_application_status
-```python
-async def track_application_status(
-    application_id: str
-) -> dict:
-    """Get the current status of a job application.
-
-    Args:
-        application_id: The application ID
-
-    Returns:
-        dict: Current status, timeline, and next steps
-    """
-    pass
-```
-
-#### withdraw_application
-```python
-async def withdraw_application(
-    application_id: str,
-    reason: str = ""
-) -> dict:
-    """Withdraw a job application.
-
-    Args:
-        application_id: The application ID
-        reason: Optional reason for withdrawal
-
-    Returns:
-        dict: Confirmation of withdrawal
     """
     pass
 ```
@@ -3098,224 +2210,6 @@ async def get_hr_messages(
 
     Returns:
         list: List of messages with HR
-    """
-    pass
-```
-
-#### schedule_hr_call
-```python
-async def schedule_hr_call(
-    user_id: str,
-    hr_id: str,
-    preferred_dates: list[str],
-    preferred_times: list[str],
-    topic: str
-) -> dict:
-    """Request to schedule a call with HR.
-
-    Args:
-        user_id: The user's ID
-        hr_id: HR representative's ID
-        preferred_dates: List of preferred dates
-        preferred_times: List of preferred time slots
-        topic: Topic of discussion
-
-    Returns:
-        dict: Scheduling request confirmation
-    """
-    pass
-```
-
-### 6. 面试准备工具 (Interview Preparation Tools)
-
-#### generate_interview_questions
-```python
-async def generate_interview_questions(
-    job_id: str,
-    question_type: str = "all",
-    difficulty: str = "mixed"
-) -> list[dict]:
-    """Generate potential interview questions for a job.
-
-    Args:
-        job_id: The job posting ID
-        question_type: Type of questions (technical, behavioral, all)
-        difficulty: Difficulty level (easy, medium, hard, mixed)
-
-    Returns:
-        list: List of interview questions with suggested answers
-    """
-    pass
-```
-
-#### provide_interview_feedback
-```python
-async def provide_interview_feedback(
-    user_id: str,
-    question: str,
-    user_answer: str
-) -> dict:
-    """Provide feedback on interview answer.
-
-    Args:
-        user_id: The user's ID
-        question: The interview question
-        user_answer: User's answer to evaluate
-
-    Returns:
-        dict: Feedback with score, strengths, improvements
-    """
-    pass
-```
-
-#### get_company_interview_insights
-```python
-async def get_company_interview_insights(
-    company_name: str
-) -> dict:
-    """Get insights about a company's interview process.
-
-    Args:
-        company_name: Name of the company
-
-    Returns:
-        dict: Interview process details, common questions, tips
-    """
-    pass
-```
-
-### 7. 通知工具 (Notification Tools)
-
-#### send_notification
-```python
-async def send_notification(
-    user_id: str,
-    title: str,
-    message: str,
-    notification_type: str,
-    priority: str = "normal",
-    related_entity: dict = {}
-) -> dict:
-    """Send a notification to the user.
-
-    Args:
-        user_id: The user's ID
-        title: Notification title
-        message: Notification message
-        notification_type: Type (application_update, interview_reminder, etc.)
-        priority: Priority level (low, normal, high)
-        related_entity: Related object (job_id, application_id, etc.)
-
-    Returns:
-        dict: Notification confirmation
-    """
-    pass
-```
-
-#### get_notifications
-```python
-async def get_notifications(
-    user_id: str,
-    unread_only: bool = False,
-    notification_type: str = ""
-) -> list[dict]:
-    """Retrieve user notifications.
-
-    Args:
-        user_id: The user's ID
-        unread_only: Only return unread notifications
-        notification_type: Filter by notification type
-
-    Returns:
-        list: List of notifications
-    """
-    pass
-```
-
-### 8. 文档生成工具 (Document Generation Tools)
-
-#### generate_resignation_letter
-```python
-async def generate_resignation_letter(
-    user_id: str,
-    company_name: str,
-    last_working_day: str,
-    reason: str = "career_growth",
-    tone: str = "professional"
-) -> str:
-    """Generate a resignation letter.
-
-    Args:
-        user_id: The user's ID
-        company_name: Current company name
-        last_working_day: Last day of work in YYYY-MM-DD format
-        reason: Reason for resignation
-        tone: Desired tone
-
-    Returns:
-        str: Generated resignation letter
-    """
-    pass
-```
-
-#### generate_thank_you_email
-```python
-async def generate_thank_you_email(
-    user_id: str,
-    interviewer_name: str,
-    company_name: str,
-    interview_date: str,
-    key_points: list[str] = []
-) -> str:
-    """Generate a post-interview thank you email.
-
-    Args:
-        user_id: The user's ID
-        interviewer_name: Name of the interviewer
-        company_name: Company name
-        interview_date: Date of interview
-        key_points: Key discussion points to mention
-
-    Returns:
-        str: Generated thank you email
-    """
-    pass
-```
-
-### 9. 技能评估工具 (Skill Assessment Tools)
-
-#### assess_skill_match
-```python
-async def assess_skill_match(
-    user_skills: list[str],
-    job_requirements: list[str]
-) -> dict:
-    """Assess how well user skills match job requirements.
-
-    Args:
-        user_skills: List of user's skills
-        job_requirements: List of required skills
-
-    Returns:
-        dict: Match analysis with matched, missing, and optional skills
-    """
-    pass
-```
-
-#### recommend_skill_development
-```python
-async def recommend_skill_development(
-    user_id: str,
-    target_role: str
-) -> list[dict]:
-    """Recommend skills to develop for career goals.
-
-    Args:
-        user_id: The user's ID
-        target_role: Target job role
-
-    Returns:
-        list: Recommended skills with learning resources
     """
     pass
 ```
@@ -3646,7 +2540,6 @@ CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "app:app"]
 
 - ✅ 系统架构设计
 - ✅ 6 个常见问题的详细解答
-- ✅ 25+ REST API 接口定义
 - ✅ 40+ AgentScope 工具定义
 - ✅ 完整的实现示例代码
 
